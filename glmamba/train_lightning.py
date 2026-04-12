@@ -184,8 +184,7 @@ def main() -> None:
         dirpath=str(out_dir),
         filename="step-{step}",
         every_n_train_steps=15000,
-        save_top_k=2,
-        monitor=None,
+        save_top_k=-1,
     )
 
     accelerator = "gpu" if torch.cuda.is_available() else "cpu"

@@ -101,6 +101,9 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--out-dir", type=str, required=True)
     p.add_argument("--resume", type=str, default=None, help="Path to Lightning checkpoint to resume from.")
 
+    p.add_argument("--num-nodes", type=int, default=1, help="Number of nodes for distributed training.")
+    p.add_argument("--gpus-per-node", type=int, default=1, help="Number of GPUs per node.")
+
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--deterministic", action="store_true")
     return p
@@ -176,24 +179,43 @@ def main() -> None:
         save_last=True,
         monitor=None,
     )
+    # Save every 15k steps (~2.5h) so progress survives SLURM time limits
+    ckpt_periodic = ModelCheckpoint(
+        dirpath=str(out_dir),
+        filename="step-{step}",
+        every_n_train_steps=15000,
+        save_top_k=2,
+        monitor=None,
+    )
 
     accelerator = "gpu" if torch.cuda.is_available() else "cpu"
-    devices = 1
+    devices = args.gpus_per_node
     precision = "16-mixed" if (args.amp and torch.cuda.is_available()) else "32"
+    strategy = "ddp" if (args.num_nodes > 1 or args.gpus_per_node > 1) else "auto"
 
     trainer = pl.Trainer(
         default_root_dir=str(out_dir),
         max_epochs=args.epochs,
         accelerator=accelerator,
         devices=devices,
+        num_nodes=args.num_nodes,
+        strategy=strategy,
         precision=precision,
         deterministic=args.deterministic,
-        callbacks=[ckpt_best, ckpt_last],
+        callbacks=[ckpt_best, ckpt_last, ckpt_periodic],
         log_every_n_steps=10,
         enable_checkpointing=True,
     )
 
-    trainer.fit(module, datamodule=dm, ckpt_path=args.resume)
+    # Auto-find latest checkpoint if --resume not specified
+    ckpt_path = args.resume
+    if ckpt_path is None:
+        last_ckpt = out_dir / "last.ckpt"
+        if last_ckpt.exists():
+            ckpt_path = str(last_ckpt)
+            print(f"Auto-resuming from {ckpt_path}")
+
+    trainer.fit(module, datamodule=dm, ckpt_path=ckpt_path)
 
 
 if __name__ == "__main__":

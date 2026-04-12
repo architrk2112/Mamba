@@ -2,10 +2,10 @@
 #SBATCH --job-name=glmamba-train
 #SBATCH --partition=gpu
 #SBATCH --account=iitr
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1
+#SBATCH --nodes=3
+#SBATCH --ntasks-per-node=2
+#SBATCH --cpus-per-task=20
+#SBATCH --gres=gpu:2
 #SBATCH --time=24:00:00
 #SBATCH --signal=B:USR1@120
 #SBATCH --requeue
@@ -15,8 +15,6 @@
 
 set -euo pipefail
 
-# Always run from the repo root so `python -m glmamba...` works even if the job
-# was submitted from inside `scripts/`.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
@@ -30,16 +28,19 @@ module load python/python3.10
 source "$HOME/anaconda3/etc/profile.d/conda.sh"
 conda activate glmamba
 
-# Ensure the runtime picks a new-enough libstdc++ (GLIBCXX_3.4.29) from the conda env / gcc module
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# Lightning reads these SLURM env vars automatically for multi-node DDP
+export MASTER_PORT=$(( 29500 + RANDOM % 100 ))
 
 srun --export=ALL python -m glmamba.train_lightning \
   --data-root "/scratch/$USER/brats2021" \
-  --out-dir "/scratch/$USER/glmamba_runs/run_001" \
+  --out-dir "/scratch/$USER/glmamba_runs/run_multinode" \
   --scale 2 \
   --epochs 50 \
   --batch-size 2 \
   --num-workers 8 \
   --lr 2e-4 \
-  --amp
-
+  --amp \
+  --num-nodes 3 \
+  --gpus-per-node 2

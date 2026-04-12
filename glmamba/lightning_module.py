@@ -66,7 +66,7 @@ class GLMambaLightningModule(pl.LightningModule):
         losses = self.loss_fn(sr, hr, rec_ref, ref)
         loss = losses["loss"]
 
-        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=lr.shape[0])
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=lr.shape[0], sync_dist=True)
         return loss
 
     @torch.no_grad()

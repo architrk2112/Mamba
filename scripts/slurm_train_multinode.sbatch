@@ -42,5 +42,5 @@ srun --export=ALL python -m glmamba.train_lightning \
   --num-workers 8 \
   --lr 2e-4 \
   --amp \
-  --num-nodes 3 \
+  --num-nodes 4 \
   --gpus-per-node 2

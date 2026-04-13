@@ -2,7 +2,7 @@
 #SBATCH --job-name=glmamba-train
 #SBATCH --partition=gpu
 #SBATCH --account=iitr
-#SBATCH --nodes=3
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=20
 #SBATCH --gres=gpu:2

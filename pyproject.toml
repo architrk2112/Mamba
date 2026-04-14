@@ -16,6 +16,7 @@ dependencies = [
   "tqdm",
   "pyyaml",
   "nibabel",
+  "torchmetrics",
 ]
 
 [tool.setuptools.packages.find]

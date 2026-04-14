@@ -15,9 +15,36 @@ except Exception as e:  # pragma: no cover
         "Install it with `pip install pytorch-lightning`."
     ) from e
 
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from torchmetrics import Metric, MeanSquaredError
+
 from glmamba.losses import GLMambaLoss, GLMambaLossConfig
-from glmamba.metrics import nmse, psnr, ssim
 from glmamba.models import GLMamba, GLMambaConfig
+
+
+class NormalizedMeanSquaredError(Metric):
+    """
+    Normalized Mean Squared Error metric for TorchMetrics.
+    NMSE = MSE(pred, target) / mean(target^2)
+    """
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.add_state("sum_squared_error", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("sum_squared_target", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+        
+    def update(self, preds: torch.Tensor, target: torch.Tensor):
+        """Update state with predictions and targets."""
+        assert preds.shape == target.shape
+        
+        self.sum_squared_error += torch.sum((preds - target) ** 2)
+        self.sum_squared_target += torch.sum(target ** 2)
+        self.total += target.numel()
+        
+    def compute(self):
+        """Compute NMSE from accumulated statistics."""
+        return self.sum_squared_error / (self.sum_squared_target + 1e-8)
 
 
 @dataclass(frozen=True)
@@ -40,6 +67,12 @@ class GLMambaLightningModule(pl.LightningModule):
         self.cfg = cfg or GLMambaLightningConfig()
         self.model = GLMamba(self.cfg.model)
         self.loss_fn = GLMambaLoss(self.cfg.loss)
+
+        # Initialize torchmetrics as stateful metrics (proper Lightning way)
+        # These automatically handle DDP synchronization and state accumulation
+        self.val_psnr = PeakSignalNoiseRatio(data_range=1.0)
+        self.val_ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
+        self.val_nmse = NormalizedMeanSquaredError()
 
         # Lightning will store this in checkpoints for reproducibility.
         self.save_hyperparameters(
@@ -69,7 +102,6 @@ class GLMambaLightningModule(pl.LightningModule):
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=lr.shape[0], sync_dist=True)
         return loss
 
-    @torch.no_grad()
     def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
         lr = batch["lr"]
         hr = batch["hr"]
@@ -77,15 +109,17 @@ class GLMambaLightningModule(pl.LightningModule):
 
         sr, _ = self(lr, ref)
 
-        # match glmamba/train.py: clamp for PSNR/SSIM, raw for NMSE
-        sr01 = sr.clamp(0, 1)
-        hr01 = hr.clamp(0, 1)
+        # Clamp for PSNR/SSIM (match glmamba/train.py behavior)
+        sr_clamped = sr.clamp(0, 1)
+        hr_clamped = hr.clamp(0, 1)
 
-        psnr_v = psnr(sr01, hr01, data_range=1.0).to(torch.float32)
-        ssim_v = ssim(sr01, hr01, data_range=1.0).to(torch.float32)
-        nmse_v = nmse(sr, hr).to(torch.float32)
+        # Update metrics (stateful - accumulates across batches)
+        self.val_psnr(sr_clamped, hr_clamped)
+        self.val_ssim(sr_clamped, hr_clamped)
+        self.val_nmse(sr, hr)
 
-        self.log("val/psnr", psnr_v, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("val/ssim", ssim_v, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log("val/nmse", nmse_v, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+        # Log metrics (automatically synced across GPUs in DDP)
+        self.log("val/psnr", self.val_psnr, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val/ssim", self.val_ssim, on_step=False, on_epoch=True, prog_bar=False)
+        self.log("val/nmse", self.val_nmse, on_step=False, on_epoch=True, prog_bar=False)
 

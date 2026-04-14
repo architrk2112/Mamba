@@ -74,9 +74,9 @@ def _run_val(
         hr = batch["hr"].to(device)
         ref = batch["ref"].to(device)
         sr, _ = model(lr, ref)
-        agg["psnr"] += float(psnr(sr.clamp(0, 1), hr.clamp(0, 1), data_range=1.0).detach().cpu().item())
-        agg["ssim"] += float(ssim(sr.clamp(0, 1), hr.clamp(0, 1), data_range=1.0).detach().cpu().item())
-        agg["nmse"] += float(nmse(sr, hr).detach().cpu().item())
+        agg["psnr"] += psnr(sr.clamp(0, 1), hr.clamp(0, 1), data_range=1.0)
+        agg["ssim"] += ssim(sr.clamp(0, 1), hr.clamp(0, 1), data_range=1.0)
+        agg["nmse"] += nmse(sr, hr)
         agg["n"] += 1.0
     n = max(1.0, agg["n"])
     return {"psnr": agg["psnr"] / n, "ssim": agg["ssim"] / n, "nmse": agg["nmse"] / n}

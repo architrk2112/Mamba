@@ -2,7 +2,7 @@
 #SBATCH --job-name=glmamba-train
 #SBATCH --partition=gpu
 #SBATCH --account=iitr
-#SBATCH --nodes=4
+#SBATCH --nodes=3
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=20
 #SBATCH --gres=gpu:2
@@ -44,5 +44,5 @@ srun --export=ALL python -m glmamba.train_lightning \
   --num-workers 8 \
   --lr 2e-4 \
   --amp \
-  --num-nodes 4 \
+  --num-nodes 3 \
   --gpus-per-node 2

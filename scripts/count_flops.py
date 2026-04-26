@@ -34,7 +34,9 @@ from glmamba.models import GLMamba, GLMambaConfig
 #   Total MACs ≈ 5 × L × d_inner × d_state   →  ×2 = FLOPs
 # ──────────────────────────────────────────────────────────────────────────────
 
-_ssm_flop_log: list[int] = []   # accumulates FLOPs from each intercepted call
+_ssm_flop_log: list[int] = []    # accumulates FLOPs from each selective_scan call
+_dcn_flop_log: list[int] = []    # accumulates FLOPs from each DeformConv2d call
+_dcn_hooks:    list      = []    # nn.Module hook handles (for cleanup)
 
 
 def _install_ssm_hook():
@@ -57,14 +59,37 @@ def _install_ssm_hook():
     _ss2d_module.selective_scan_fn = _counting_fn
 
 
-def _uninstall_ssm_hook():
-    """Restore the original selective_scan_fn."""
-    import glmamba.models.ss2d as _ss2d_module
-    from glmamba.models.ss2d import selective_scan_fn as _patched
+def _install_dcn_hooks(model: torch.nn.Module):
+    """
+    Register a forward hook on every DeformConv2d in the model.
+    fvcore counts torchvision::deform_conv2d as 0 FLOPs, so we count manually.
 
-    # The module already imported the original via closure; just reload.
-    # Simplest: nothing critical here — we only need it once for profiling.
-    pass
+    DeformConv2d FLOPs (same formula as a standard Conv2d):
+      FLOPs = 2 × C_in × C_out × k_h × k_w × H_out × W_out
+    The deformable sampling doesn't add significant extra multiply-adds
+    beyond the standard convolution kernel computation.
+    """
+    from torchvision.ops import DeformConv2d
+
+    def _dcn_hook(module, inputs, output):
+        x = inputs[0]                          # (B, C_in, H, W)
+        B, C_in, H_in, W_in = x.shape
+        C_out = module.weight.shape[0]
+        k_h, k_w = module.weight.shape[2], module.weight.shape[3]
+        # output spatial size (stride=1, same padding assumed)
+        H_out, W_out = output.shape[2], output.shape[3]
+        macs = int(C_in) * int(C_out) * int(k_h) * int(k_w) * int(H_out) * int(W_out)
+        _dcn_flop_log.append(macs * 2)         # MACs → FLOPs
+
+    for module in model.modules():
+        if isinstance(module, DeformConv2d):
+            _dcn_hooks.append(module.register_forward_hook(_dcn_hook))
+
+
+def _remove_dcn_hooks():
+    for h in _dcn_hooks:
+        h.remove()
+    _dcn_hooks.clear()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -95,18 +120,26 @@ def main():
     print(f"  Trainable params: {trainable_params:>12,}  ({trainable_params/1e6:.2f} M)")
     print("=" * 60)
 
-    # ── Step 1: Exact SSM FLOPs via runtime hook ──────────────────────────────
-    # Install hook BEFORE the forward pass so every selective_scan_fn call
-    # records real tensor shapes → exact FLOPs with no formula guessing.
+    # ── Step 1: Exact FLOPs for CUDA/custom ops via runtime hooks ────────────
+    # Both selective_scan_cuda and DeformConv2d are unsupported by fvcore.
     _install_ssm_hook()
+    _install_dcn_hooks(model)
     with torch.no_grad():
-        _ = model(lr_in, ref_in)          # single forward pass to trigger hook
+        _ = model(lr_in, ref_in)          # single forward pass to trigger hooks
+    _remove_dcn_hooks()
+
     ssm_flops = sum(_ssm_flop_log)
-    ssm_calls = len(_ssm_flop_log)
-    print(f"\n  SSM hook intercepted {ssm_calls} selective_scan calls:")
+    dcn_flops = sum(_dcn_flop_log)
+
+    print(f"\n  SSM hook intercepted {len(_ssm_flop_log)} selective_scan calls:")
     for i, f in enumerate(_ssm_flop_log):
         print(f"    call {i+1:>2}: {f:>12,}  ({f/1e9:.4f} GFLOPs)")
-    print(f"  SSM total: {ssm_flops:,}  ({ssm_flops/1e9:.3f} GFLOPs)")
+    print(f"  SSM total : {ssm_flops:>14,}  ({ssm_flops/1e9:.3f} GFLOPs)")
+
+    print(f"\n  DeformConv2d hook intercepted {len(_dcn_flop_log)} calls:")
+    for i, f in enumerate(_dcn_flop_log):
+        print(f"    call {i+1:>2}: {f:>12,}  ({f/1e9:.4f} GFLOPs)")
+    print(f"  DCN total : {dcn_flops:>14,}  ({dcn_flops/1e9:.3f} GFLOPs)")
 
     # ── Step 2: fvcore for all standard ops (Conv, Linear, LN, etc.) ──────────
     try:
@@ -117,10 +150,11 @@ def main():
         flops.uncalled_modules_warnings(False)
 
         fvcore_flops = flops.total()
-        total_flops  = fvcore_flops + ssm_flops
+        total_flops  = fvcore_flops + ssm_flops + dcn_flops
 
         print(f"\n  fvcore standard ops      : {fvcore_flops:>14,}  ({fvcore_flops/1e9:.3f} GFLOPs)")
         print(f"  SSM recurrence (hook)    : {ssm_flops:>14,}  ({ssm_flops/1e9:.3f} GFLOPs)")
+        print(f"  DeformConv2d   (hook)    : {dcn_flops:>14,}  ({dcn_flops/1e9:.3f} GFLOPs)")
         print(f"  {'─'*49}")
         print(f"  TOTAL FLOPs              : {total_flops:>14,}  ({total_flops/1e9:.3f} GFLOPs)")
         print(f"  TOTAL GMACs (FLOPs÷2)    : {total_flops/2/1e9:>14.3f}  GMACs")
